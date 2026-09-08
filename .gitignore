@@ -1,0 +1,15 @@
+# build output
+/tapline
+/tapdump
+/dist/
+
+# captures — these contain real traffic and can be large
+*.tap
+
+# the MITM CA and its private key must never be committed
+/ca/
+ca.pem
+ca.key.pem
+
+# macOS
+.DS_Store
