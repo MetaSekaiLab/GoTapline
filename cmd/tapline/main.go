@@ -71,6 +71,7 @@ func main() {
 		recOpaque = flag.Bool("record-opaque", false, "also record ciphertext of connections that were not decrypted")
 		insecure  = flag.Bool("insecure-upstream", false, "skip verification of the real server's certificate")
 		printCA   = flag.Bool("print-ca", false, "print the CA certificate path and fingerprint, then exit")
+		debug     = flag.Bool("debug", false, "log every TLS connection that passes through undecrypted, and summarise the hostnames on exit")
 		quiet     = flag.Bool("quiet", false, "only log errors")
 	)
 	flag.Parse()
@@ -117,6 +118,7 @@ func main() {
 		Advertise:    *advertise,
 		MITM:         mcfg,
 		RecordOpaque: *recOpaque,
+		Debug:        *debug,
 		Logf:         logf,
 	}, w)
 	if err != nil {
@@ -124,8 +126,8 @@ func main() {
 		log.Fatalf("tapline: %v", err)
 	}
 
-	w.Meta("tapline start listen=%s mitm=%v allow-h2=%v record-opaque=%v advertise=%s ca-sha256=%s",
-		*listen, hosts, *allowH2, *recOpaque, srv.AdvertiseIP(), ca.Fingerprint())
+	w.Meta("tapline start listen=%s mitm=%v allow-h2=%v record-opaque=%v debug=%v advertise=%s ca-sha256=%s",
+		*listen, hosts, *allowH2, *recOpaque, *debug, srv.AdvertiseIP(), ca.Fingerprint())
 
 	fmt.Printf("capture     : %s\n", path)
 	fmt.Printf("socks5      : %s   (UDP relay advertised as %s)\n", *listen, srv.AdvertiseIP())
@@ -139,6 +141,9 @@ func main() {
 		}
 	} else {
 		fmt.Printf("decrypting  : nothing (-mitm not set); TLS is tunnelled untouched\n")
+	}
+	if *debug {
+		fmt.Printf("debug       : logging undecrypted TLS hosts; summary on exit\n")
 	}
 	fmt.Println()
 
@@ -171,6 +176,7 @@ func main() {
 				fmt.Printf("dropped     : %d  (capture is incomplete)\n", dropped)
 			}
 			fmt.Printf("file        : %s\n", path)
+			printSkipped(srv, *debug)
 			return
 		case err := <-errc:
 			if err != nil {
@@ -181,6 +187,25 @@ func main() {
 			return
 		}
 	}
+}
+
+// printSkipped lists the hostnames that were tunnelled rather than decrypted,
+// which is the list to draw from when deciding what to add to -mitm.
+func printSkipped(srv *socks.Server, debug bool) {
+	if !debug {
+		return
+	}
+	hosts := srv.SkippedHosts()
+	if len(hosts) == 0 {
+		fmt.Printf("\nno undecrypted TLS connections were seen.\n")
+		return
+	}
+	fmt.Printf("\nTLS hosts seen but NOT decrypted (%d):\n", len(hosts))
+	for _, h := range hosts {
+		fmt.Printf("  %5d conn  %s\n", h.Conns, h.Host)
+	}
+	fmt.Printf("\nAdd any of these to -mitm to decrypt them next run. Hosts that pin their\n")
+	fmt.Printf("certificate will fail the handshake if intercepted, so add them one at a time.\n")
 }
 
 func defaultCADir() string {

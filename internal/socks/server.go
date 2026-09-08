@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -57,6 +58,12 @@ type Options struct {
 	// intercepted. Off by default to keep captures small.
 	RecordOpaque bool
 
+	// Debug logs every TLS connection that passes through without being
+	// decrypted, and collects the hostnames for a summary at shutdown. It also
+	// forces ClientHello inspection even when MITM is disabled, which is what
+	// makes the hostnames available in the first place.
+	Debug bool
+
 	// DialTimeout bounds upstream connection attempts.
 	DialTimeout time.Duration
 
@@ -78,6 +85,15 @@ type Server struct {
 	wg   sync.WaitGroup
 	quit chan struct{}
 	once sync.Once
+
+	skippedMu sync.Mutex
+	skipped   map[string]int
+}
+
+// SkippedHost is one hostname that was tunnelled rather than decrypted.
+type SkippedHost struct {
+	Host  string // SNI, or a placeholder when there was none
+	Conns int
 }
 
 // New creates a server that writes captured traffic to w.
@@ -91,7 +107,7 @@ func New(opt Options, w *tapfile.Writer) (*Server, error) {
 	if opt.Logf == nil {
 		opt.Logf = log.Printf
 	}
-	s := &Server{opt: opt, w: w, quit: make(chan struct{})}
+	s := &Server{opt: opt, w: w, quit: make(chan struct{}), skipped: map[string]int{}}
 
 	ip, err := resolveAdvertise(opt.Advertise)
 	if err != nil {
@@ -103,6 +119,33 @@ func New(opt Options, w *tapfile.Writer) (*Server, error) {
 
 // AdvertiseIP reports the address handed to clients for UDP relay.
 func (s *Server) AdvertiseIP() net.IP { return s.advertiseIP }
+
+// noteSkipped counts a connection that was not decrypted.
+func (s *Server) noteSkipped(host string) {
+	s.skippedMu.Lock()
+	s.skipped[host]++
+	s.skippedMu.Unlock()
+}
+
+// SkippedHosts returns the hostnames seen but not decrypted, busiest first.
+//
+// This is the list to consult when deciding what to add to -mitm.
+func (s *Server) SkippedHosts() []SkippedHost {
+	s.skippedMu.Lock()
+	out := make([]SkippedHost, 0, len(s.skipped))
+	for h, n := range s.skipped {
+		out = append(out, SkippedHost{Host: h, Conns: n})
+	}
+	s.skippedMu.Unlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Conns != out[j].Conns {
+			return out[i].Conns > out[j].Conns
+		}
+		return out[i].Host < out[j].Host
+	})
+	return out
+}
 
 // resolveAdvertise picks the address to advertise for UDP relay.
 func resolveAdvertise(explicit string) (net.IP, error) {

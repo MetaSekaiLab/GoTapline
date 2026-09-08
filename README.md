@@ -55,7 +55,36 @@ Useful flags:
 | `-advertise 192.168.50.10` | IP handed to clients for UDP relay; auto-detected by default |
 | `-allow-h2` | offer HTTP/2 when intercepting (see the caveat below) |
 | `-record-opaque` | also store ciphertext of connections that were not decrypted |
+| `-debug` | log every TLS connection that passes through undecrypted, and summarise the hostnames on exit |
 | `-print-ca` | print the CA path and fingerprint, then exit |
+
+## Finding out what to decrypt
+
+Undecrypted connections are silent by default. `-debug` logs each one as it
+happens and prints a deduplicated summary on exit:
+
+```
+$ ./tapline -out run.tap -mitm api.example.com -debug
+...
+skip  192.0.2.10:51234 -> cdn.example.com:443  sni=cdn.example.com
+skip  192.0.2.10:51235 -> metrics.example.net:443  sni=metrics.example.net
+
+^C
+TLS hosts seen but NOT decrypted (2):
+      7 conn  cdn.example.com
+      2 conn  metrics.example.net
+```
+
+This works with no `-mitm` at all, which is the natural way to survey an app
+before deciding what to intercept: the ClientHello is inspected for the
+hostname even when nothing is being decrypted.
+
+Connections that are not TLS, or TLS without SNI, are reported as
+`(not TLS) host` and `(no SNI) host` so they are not silently lumped together.
+
+Add hosts to `-mitm` **one at a time**: a host that pins its certificate will
+fail its handshake once intercepted, and adding several at once makes it harder
+to see which one broke.
 
 ## Device setup (iPad + Shadowrocket)
 

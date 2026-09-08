@@ -26,9 +26,10 @@ func (s *Server) handleConnect(client net.Conn, dst target) {
 		return
 	}
 
-	// Only bother peeking when interception is configured and this could
-	// plausibly be TLS.
-	if s.opt.MITM == nil {
+	// Peek when either interception or debug reporting needs the hostname.
+	// Without this, running -debug alone would report connections with no name
+	// attached, since nothing would have parsed the ClientHello.
+	if s.opt.MITM == nil && !s.opt.Debug {
 		s.tunnel(client, upstream, dst, "")
 		return
 	}
@@ -45,7 +46,7 @@ func (s *Server) handleConnect(client net.Conn, dst target) {
 	// Replay whatever we consumed so the next stage sees a complete stream.
 	replayed := mitm.NewPeekedConn(client, consumed)
 
-	if sni != "" && s.opt.MITM.ShouldIntercept(sni) {
+	if sni != "" && s.opt.MITM != nil && s.opt.MITM.ShouldIntercept(sni) {
 		fid, ferr := s.w.FlowOpen(tapfile.FlowOpen{
 			Proto:  tapfile.ProtoTCP,
 			Mode:   tapfile.ModeTLSPlaintext,
@@ -68,7 +69,25 @@ func (s *Server) handleConnect(client net.Conn, dst target) {
 		return
 	}
 
+	if s.opt.Debug {
+		s.reportSkipped(client, dst, sni, err)
+	}
 	s.tunnel(replayed, upstream, dst, sni)
+}
+
+// reportSkipped logs and counts a connection that passed through undecrypted.
+func (s *Server) reportSkipped(client net.Conn, dst target, sni string, peekErr error) {
+	switch {
+	case sni != "":
+		s.noteSkipped(sni)
+		s.opt.Logf("skip  %s -> %s  sni=%s", client.RemoteAddr(), dst, sni)
+	case errors.Is(peekErr, mitm.ErrNotClientHello):
+		s.noteSkipped("(not TLS) " + dst.host)
+		s.opt.Logf("skip  %s -> %s  (not TLS)", client.RemoteAddr(), dst)
+	default:
+		s.noteSkipped("(no SNI) " + dst.host)
+		s.opt.Logf("skip  %s -> %s  (TLS without SNI)", client.RemoteAddr(), dst)
+	}
 }
 
 // tunnel forwards without inspection, recording only flow metadata unless the

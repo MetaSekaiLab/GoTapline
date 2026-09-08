@@ -26,7 +26,7 @@ import (
 
 // startProxy brings up a tapline SOCKS5 server on loopback writing to a temp
 // capture file, intercepting the given SNI names.
-func startProxy(t *testing.T, hosts []string) (addr string, capturePath string, ca *mitm.CA, stop func()) {
+func startProxy(t *testing.T, hosts []string) (addr string, capturePath string, ca *mitm.CA, srvOut *socks.Server, stop func()) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -56,6 +56,7 @@ func startProxy(t *testing.T, hosts []string) (addr string, capturePath string, 
 		// to advertise a loopback address
 		Advertise: "127.0.0.1",
 		MITM:      mcfg,
+		Debug:     true,
 		Logf:      t.Logf,
 	}, w)
 	if err != nil {
@@ -76,7 +77,7 @@ func startProxy(t *testing.T, hosts []string) (addr string, capturePath string, 
 		t.Fatal("proxy never bound")
 	}
 
-	return srv.Addr().String(), capturePath, ca, func() {
+	return srv.Addr().String(), capturePath, ca, srv, func() {
 		srv.Close()
 		w.Close()
 	}
@@ -225,7 +226,7 @@ func TestUnifiedCapture(t *testing.T) {
 	}()
 	udpPort := udpSrv.LocalAddr().(*net.UDPAddr).Port
 
-	proxy, capturePath, _, stop := startProxy(t, []string{sni})
+	proxy, capturePath, _, _, stop := startProxy(t, []string{sni})
 	defer stop()
 
 	var wg sync.WaitGroup
@@ -402,7 +403,7 @@ func TestPinnedHostIsNotIntercepted(t *testing.T) {
 	defer origin.Close()
 	_, port := splitHostPort(t, origin.addr)
 
-	proxy, capturePath, ca, stop := startProxy(t, []string{allowed})
+	proxy, capturePath, ca, _, stop := startProxy(t, []string{allowed})
 	defer stop()
 
 	// Trust only the origin's own CA, not the MITM CA.
@@ -563,4 +564,73 @@ func httptestNewTLSServer(t *testing.T, h http.Handler) *tlsOrigin {
 	o := &tlsOrigin{addr: ln.Addr().String(), cert: parsed, ln: ln, srv: srv}
 	go srv.ServeTLS(ln, "", "")
 	return o
+}
+
+// TestDebugReportsUndecryptedHosts covers the -debug reporting path: hostnames
+// that pass through without being decrypted must be collected, deduplicated
+// with a count, and must not include hosts that WERE decrypted.
+func TestDebugReportsUndecryptedHosts(t *testing.T) {
+	const allowed = "intercept.example"
+	const skipped = "passthrough.example"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	origin := httptestNewTLSServer(t, mux)
+	defer origin.Close()
+	_, port := splitHostPort(t, origin.addr)
+
+	proxy, _, _, srv, stop := startProxy(t, []string{allowed})
+	defer stop()
+
+	// two connections to the pass-through host, one to the intercepted host
+	for i := 0; i < 2; i++ {
+		raw := socksConnect(t, proxy, "127.0.0.1", port)
+		tc := tls.Client(raw, &tls.Config{ServerName: skipped, InsecureSkipVerify: true})
+		tc.Handshake()
+		tc.Close()
+		raw.Close()
+	}
+	raw := socksConnect(t, proxy, "127.0.0.1", port)
+	tc := tls.Client(raw, &tls.Config{ServerName: allowed, InsecureSkipVerify: true})
+	tc.Handshake()
+	tc.Close()
+	raw.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	got := srv.SkippedHosts()
+	var found bool
+	for _, h := range got {
+		if h.Host == allowed {
+			t.Errorf("decrypted host %q was reported as skipped", allowed)
+		}
+		if h.Host == skipped {
+			found = true
+			if h.Conns != 2 {
+				t.Errorf("skipped host %q: %d connections, want 2", h.Host, h.Conns)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("pass-through host %q missing from SkippedHosts, got %+v", skipped, got)
+	}
+}
+
+// TestDebugOffCollectsNothing ensures the reporting is genuinely opt-in.
+func TestDebugOffCollectsNothing(t *testing.T) {
+	w, err := tapfile.Create(filepath.Join(t.TempDir(), "n.tap"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	srv, err := socks.New(socks.Options{
+		Listen: "127.0.0.1:0", Advertise: "127.0.0.1",
+		Logf: func(string, ...any) {},
+	}, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(srv.SkippedHosts()); n != 0 {
+		t.Errorf("SkippedHosts returned %d entries before any traffic", n)
+	}
 }
