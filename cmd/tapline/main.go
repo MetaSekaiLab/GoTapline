@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -33,12 +34,38 @@ import (
 	"gotapline/internal/tapfile"
 )
 
+// hostList collects SNI names from a flag that may be repeated and may also
+// carry comma-separated values, so -mitm a,b and -mitm a -mitm b both work.
+//
+// Go's default string flag silently keeps only the last occurrence, which would
+// mean a capture quietly covering fewer hosts than the operator asked for.
+type hostList []string
+
+func (h *hostList) String() string { return strings.Join(*h, ",") }
+
+func (h *hostList) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if slices.Contains(*h, part) {
+			continue // tolerate duplicates rather than intercepting twice
+		}
+		*h = append(*h, part)
+	}
+	return nil
+}
+
 func main() {
+	var mitmHosts hostList
+	flag.Var(&mitmHosts, "mitm",
+		"SNI name to decrypt; '*.' prefix matches subdomains. Repeatable, and accepts a comma-separated list. Empty disables MITM")
+
 	var (
 		listen    = flag.String("listen", ":1080", "SOCKS5 listen address")
 		out       = flag.String("out", "", "capture file (default capture-<timestamp>.tap)")
 		caDir     = flag.String("ca-dir", defaultCADir(), "directory holding the MITM CA")
-		mitmHosts = flag.String("mitm", "", "comma-separated SNI names to decrypt; '*.' prefix matches subdomains. Empty disables MITM")
 		advertise = flag.String("advertise", "", "IP to advertise for UDP relay (default: auto-detect the outbound interface)")
 		allowH2   = flag.Bool("allow-h2", false, "offer HTTP/2 when intercepting; leaving this off keeps the recorded plaintext readable HTTP/1.1")
 		recOpaque = flag.Bool("record-opaque", false, "also record ciphertext of connections that were not decrypted")
@@ -70,13 +97,8 @@ func main() {
 	}
 
 	var mcfg *mitm.Config
-	var hosts []string
-	if strings.TrimSpace(*mitmHosts) != "" {
-		for _, h := range strings.Split(*mitmHosts, ",") {
-			if h = strings.TrimSpace(h); h != "" {
-				hosts = append(hosts, h)
-			}
-		}
+	hosts := []string(mitmHosts)
+	if len(hosts) > 0 {
 		mcfg = &mitm.Config{
 			CA:               ca,
 			Hosts:            hosts,

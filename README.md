@@ -31,7 +31,15 @@ go build ./cmd/tapdump
 ## Run
 
 ```sh
-./tapline -out run.tap -mitm mkcn-prod-public-60001-1.dailygn.com
+./tapline -out run.tap -mitm api.example.com
+```
+
+`-mitm` may be repeated and may carry a comma-separated list, and the two forms
+combine, so these are equivalent:
+
+```sh
+./tapline -mitm "a.example.com,*.b.example.com"
+./tapline -mitm a.example.com -mitm "*.b.example.com"
 ```
 
 Startup prints the CA path, its SHA-256, and the address advertised for UDP
@@ -43,7 +51,7 @@ Useful flags:
 | Flag | Purpose |
 |---|---|
 | `-listen :1080` | SOCKS5 listen address |
-| `-mitm a.com,*.b.com` | SNI names to decrypt. Empty means decrypt nothing |
+| `-mitm a.com,*.b.com` | SNI name to decrypt. **Repeatable**, and accepts a comma-separated list; the two forms combine. Empty means decrypt nothing |
 | `-advertise 192.168.50.10` | IP handed to clients for UDP relay; auto-detected by default |
 | `-allow-h2` | offer HTTP/2 when intercepting (see the caveat below) |
 | `-record-opaque` | also store ciphertext of connections that were not decrypted |
